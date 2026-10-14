@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telethon import Button, TelegramClient, events
-from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
 
 import db
 import storage
@@ -52,7 +52,12 @@ ARCHIVE_EXT = (".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".ca
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("archive-bot")
 
-client = TelegramClient(StringSession(), API_ID, API_HASH)
+# سشن روی دیسک ذخیره می‌شود تا بعد از هر ری‌استارت دوباره با توکن لاگین نکنیم
+# (لاگین‌های پشت‌سرهم باعث FloodWait چند ده‌دقیقه‌ای تلگرام می‌شود).
+# باید بیرون از WORK_DIR باشد چون WORK_DIR در شروع پاک می‌شود.
+SESSION_DIR = Path(os.getenv("SESSION_DIR") or ("/data/session" if Path("/data").is_dir() else "/tmp/archive-bot-session"))
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+client = TelegramClient(str(SESSION_DIR / f"bot_{BOT_TOKEN.split(':')[0]}"), API_ID, API_HASH)
 JOBS = asyncio.Semaphore(MAX_PARALLEL_JOBS)
 
 
@@ -744,6 +749,18 @@ async def janitor():
                 sessions.pop(uid, None)
 
 
+async def connect_bot():
+    """لاگین با توکن؛ اگر تلگرام FloodWait داد، به‌جای کرش (و ری‌استارت‌های پشت‌سرهم) صبر می‌کنیم."""
+    while True:
+        try:
+            await client.start(bot_token=BOT_TOKEN)
+            return
+        except FloodWaitError as e:
+            wait = e.seconds + 10
+            log.warning("FloodWait تلگرام: %s ثانیه (~%s دقیقه) صبر می‌کنم و دوباره تلاش می‌کنم ...", wait, wait // 60)
+            await asyncio.sleep(wait)
+
+
 def startup_cleanup():
     """باقی‌مانده‌ی کارهای نیمه‌تمام (مثلاً بعد از کرش) را پاک می‌کند."""
     shutil.rmtree(WORK_DIR, ignore_errors=True)
@@ -758,7 +775,7 @@ if __name__ == "__main__":
     )
     client.loop.run_until_complete(db.init())
     storage.init()
-    client.loop.run_until_complete(client.start(bot_token=BOT_TOKEN))
+    client.loop.run_until_complete(connect_bot())
     client.loop.create_task(janitor())
     client.loop.create_task(storage.janitor())
     log.info("Bot is running ...")
